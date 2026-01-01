@@ -1,0 +1,1257 @@
+// ========================================================
+// FILE: SpiralSmartForm.jsx
+// PURPOSE: Smart Production Entry for Spiral Section
+// VERSION: 2.5 - Fixed FiBarChart2 Usage
+// ========================================================
+
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { 
+  FiSave, FiClock, FiCheck, FiAlertCircle, FiPlus,
+  FiTrash2, FiTrendingUp, FiRefreshCw, FiArrowLeft, 
+  FiCpu, FiPackage, FiUser, FiEdit3, FiChevronRight,
+  FiChevronLeft, FiArrowUp, FiArrowDown,
+  FiTarget, FiBarChart2, FiXCircle
+} from 'react-icons/fi';
+import { supabase } from '../../../supabaseClient';
+import './SpiralSmartForm.css';
+
+const SpiralSmartForm = () => {
+  const navigate = useNavigate();
+  
+  // Constants
+  const CURRENT_SECTION = 'Spiral';
+  
+  // States
+  const [selectedShift, setSelectedShift] = useState('');
+  const [shifts, setShifts] = useState([]);
+  const [machines, setMachines] = useState([]);
+  const [machineData, setMachineData] = useState({});
+  const [items, setItems] = useState([]);
+  const [targets, setTargets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [isMobile, setIsMobile] = useState(false);
+  const [validationErrors, setValidationErrors] = useState({});
+  const [activeMachineIndex, setActiveMachineIndex] = useState(0);
+  const [draftSaved, setDraftSaved] = useState(false);
+
+  // ==================== CHECK MOBILE ====================
+  useEffect(() => {
+    const checkMobile = () => setIsMobile(window.innerWidth <= 768);
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  // ==================== AUTO-SAVE DRAFT ====================
+  useEffect(() => {
+    let autoSaveTimer;
+    
+    const saveDraft = async () => {
+      if (selectedShift && Object.keys(machineData).length > 0) {
+        try {
+          const draftData = {
+            shift: selectedShift,
+            machineData,
+            timestamp: new Date().toISOString()
+          };
+          localStorage.setItem(`spiral_draft_${selectedShift}`, JSON.stringify(draftData));
+          setDraftSaved(true);
+          
+          setTimeout(() => setDraftSaved(false), 3000);
+        } catch (err) {
+          console.error('Draft save error:', err);
+        }
+      }
+    };
+
+    if (selectedShift) {
+      autoSaveTimer = setTimeout(saveDraft, 30000);
+    }
+
+    return () => {
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    };
+  }, [selectedShift, machineData]);
+
+  // ==================== LOAD DRAFT ON SHIFT SELECT ====================
+  const loadDraftForShift = useCallback((shiftCode) => {
+    try {
+      const draft = localStorage.getItem(`spiral_draft_${shiftCode}`);
+      if (draft) {
+        const parsedDraft = JSON.parse(draft);
+        if (parsedDraft.machineData) {
+          setMachineData(parsedDraft.machineData);
+          setSuccess('Previous draft loaded successfully');
+          setTimeout(() => setSuccess(''), 3000);
+        }
+      }
+    } catch (err) {
+      console.error('Draft load error:', err);
+    }
+  }, []);
+
+  // ==================== NORMALIZE TARGETS DATA ====================
+  const normalizedTargets = useMemo(() => {
+    return targets.map(target => ({
+      id: target.targets_id || target.id,
+      machine_no: target.machine_no || target.machine_number || target.machine_id,
+      shift_code: target.shift_code || target.shift,
+      section_name: target.section_name,
+      target_qty: parseFloat(target.target_qty || target.quantity || 0),
+      uom: target.uom || target.unit || 'Meter',
+      rawData: target
+    }));
+  }, [targets]);
+
+  // ==================== FETCH DATA ====================
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        setLoading(true);
+        
+        // سب سے پہلے targets fetch کریں
+        const targetsRes = await supabase
+          .from('targets')
+          .select('*')
+          .eq('section_name', CURRENT_SECTION);
+
+        if (targetsRes.error) throw targetsRes.error;
+
+        const targetsData = targetsRes.data || [];
+
+        // Targets سے unique shift codes نکالیں
+        const uniqueShiftCodes = [...new Set(targetsData.map(t => t.shift_code))];
+        
+        // اب shifts fetch کریں جو targets میں موجود ہوں
+        const shiftsRes = await supabase
+          .from('shifts')
+          .select('*')
+          .in('shift_code', uniqueShiftCodes)
+          .order('shift_code');
+
+        // Items fetch کریں
+        const itemsRes = await supabase
+          .from('spiralitem')
+          .select('*')
+          .order('item_code');
+
+        if (shiftsRes.error) throw shiftsRes.error;
+        if (itemsRes.error) throw itemsRes.error;
+
+        const shiftsData = shiftsRes.data || [];
+        const itemsData = itemsRes.data || [];
+
+        // Get unique machines for current section
+        const machineSet = new Set();
+        const uniqueMachines = [];
+
+        targetsData.forEach(target => {
+          const machineNo = target.machine_no || target.machine_number;
+          if (machineNo && !machineSet.has(machineNo)) {
+            machineSet.add(machineNo);
+            uniqueMachines.push({
+              machine_no: machineNo,
+              machine_id: target.machine_id || target.machine,
+              section_name: target.section_name
+            });
+          }
+        });
+
+        setShifts(shiftsData);
+        setTargets(targetsData);
+        setMachines(uniqueMachines);
+        setItems(itemsData);
+
+      } catch (error) {
+        console.error('Data fetch error:', error);
+        setError('Failed to load data. Please try again.');
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, [CURRENT_SECTION]);
+
+  // ==================== GET TARGET FOR MACHINE ====================
+  const getTargetForMachine = useCallback((machineNo, shiftCode) => {
+    if (!machineNo || !shiftCode) return null;
+
+    return normalizedTargets.find(target => {
+      return target.machine_no === machineNo && 
+             target.shift_code === shiftCode &&
+             target.section_name === CURRENT_SECTION;
+    });
+  }, [normalizedTargets, CURRENT_SECTION]);
+
+  // ==================== HANDLE SHIFT SELECTION ====================
+  const handleShiftSelect = (shiftCode) => {
+    setSelectedShift(shiftCode);
+    setActiveMachineIndex(0);
+    setError('');
+    setSuccess('');
+    setValidationErrors({});
+
+    if (!shiftCode) {
+      setMachineData({});
+      return;
+    }
+
+    loadDraftForShift(shiftCode);
+
+    const selectedShiftData = shifts.find(s => s.shift_code === shiftCode);
+    const initialMachineData = {};
+
+    // Get machines ONLY for this shift and sort by machine number
+    const machinesForThisShift = normalizedTargets
+      .filter(target => 
+        target.shift_code === shiftCode &&
+        target.section_name === CURRENT_SECTION
+      )
+      .map(target => ({
+        machine_no: target.machine_no,
+        machine_id: target.rawData.machine_id || target.machine_no,
+        section_name: target.section_name
+      }))
+      .filter((machine, index, self) => 
+        index === self.findIndex(m => m.machine_no === machine.machine_no)
+      )
+      .sort((a, b) => {
+        const numA = parseInt(a.machine_no.replace(/\D/g, '')) || 0;
+        const numB = parseInt(b.machine_no.replace(/\D/g, '')) || 0;
+        return numA - numB;
+      });
+
+    // Only initialize if no draft loaded
+    if (!localStorage.getItem(`spiral_draft_${shiftCode}`)) {
+      machinesForThisShift.forEach(machine => {
+        const target = getTargetForMachine(machine.machine_no, shiftCode);
+        
+        initialMachineData[machine.machine_no] = {
+          machine_id: target?.rawData?.machine_id || machine.machine_id || '',
+          machine_no: machine.machine_no,
+          targets_id: target?.id || target?.rawData?.targets_id || '',
+          target_qty: target?.target_qty || 0,
+          unit: target?.uom || 'Meter',
+          shift_code: shiftCode,
+          shift_name: selectedShiftData?.shift_name || shiftCode,
+          items: [{ 
+            id: Date.now(), 
+            item_code: '', 
+            item_name: '', 
+            raw_material_flatsize: '',
+            material_type: '',
+            wire_size: '',
+            finishedproductname: '',
+            production_quantity: '', 
+            per_meter_wt: '',
+            weight: '',
+            unit: 'Kg', 
+            efficiency: 0
+          }],
+          operator_name: '',
+          users_name: '',
+          remarks: '',
+          section_name: CURRENT_SECTION
+        };
+      });
+
+      setMachineData(initialMachineData);
+    }
+  };
+
+  // ==================== HANDLE ITEM CHANGES ====================
+  const handleItemChange = (machineNo, itemId, field, value) => {
+    setMachineData(prev => {
+      const updated = { ...prev };
+      const machine = updated[machineNo];
+      
+      if (!machine) return prev;
+
+      const updatedItems = machine.items.map(item => {
+        if (item.id === itemId) {
+          const newItem = { ...item, [field]: value };
+
+          // Auto-fill item details when item_code changes
+          if (field === 'item_code' && value) {
+            const selectedItem = items.find(i => i.item_code === value);
+            if (selectedItem) {
+              newItem.item_name = selectedItem.item_name || '';
+              newItem.unit = selectedItem.unit || 'Kg';
+              newItem.raw_material_flatsize = selectedItem.raw_material_flatsize || '';
+              newItem.material_type = selectedItem.material_type || '';
+              newItem.wire_size = selectedItem.wire_size || '';
+              newItem.finishedproductname = selectedItem.finishedproductname || '';
+              newItem.per_meter_wt = selectedItem.per_meter_wt || '';
+            }
+          }
+
+          // Calculate weight when production_quantity or per_meter_wt changes
+          if ((field === 'production_quantity' || field === 'per_meter_wt') && 
+              (newItem.production_quantity && newItem.per_meter_wt)) {
+            const qty = parseFloat(newItem.production_quantity) || 0;
+            const perMeterWt = parseFloat(newItem.per_meter_wt) || 0;
+            newItem.weight = (qty * perMeterWt).toFixed(2);
+          }
+
+          // ✅ **FIXED: Calculate efficiency based on PRODUCTION QUANTITY, not weight**
+          if (field === 'production_quantity') {
+            const productionQty = parseFloat(newItem.production_quantity) || 0;
+            const targetQty = machine.target_qty || 0;
+            
+            // Efficiency = (Production Quantity / Target Quantity) * 100
+            const efficiency = targetQty > 0 ? (productionQty / targetQty) * 100 : 0;
+            newItem.efficiency = parseFloat(efficiency.toFixed(1));
+          }
+
+          return newItem;
+        }
+        return item;
+      });
+
+      updated[machineNo] = { ...machine, items: updatedItems };
+      return updated;
+    });
+  };
+
+  // ==================== BULK OPERATIONS ====================
+  const handleBulkUpdate = (field, value) => {
+    const updatedData = { ...machineData };
+    Object.keys(updatedData).forEach(machineNo => {
+      updatedData[machineNo] = {
+        ...updatedData[machineNo],
+        [field]: value
+      };
+    });
+    setMachineData(updatedData);
+  };
+
+  // ==================== CLEAR MACHINE DATA ====================
+  const clearMachineData = (machineNo) => {
+    setMachineData(prev => {
+      const updated = { ...prev };
+      const machine = updated[machineNo];
+      
+      if (!machine) return prev;
+
+      // Reset all items to empty
+      updated[machineNo] = {
+        ...machine,
+        items: [{ 
+          id: Date.now(), 
+          item_code: '', 
+          item_name: '', 
+          raw_material_flatsize: '',
+          material_type: '',
+          wire_size: '',
+          finishedproductname: '',
+          production_quantity: '', 
+          per_meter_wt: '',
+          weight: '',
+          unit: 'Kg', 
+          efficiency: 0
+        }],
+        operator_name: '',
+        users_name: '',
+        remarks: ''
+      };
+      
+      return updated;
+    });
+    
+    setSuccess(`Machine ${machineNo} data cleared`);
+    setTimeout(() => setSuccess(''), 3000);
+  };
+
+  // ==================== ADD/REMOVE ITEMS ====================
+  const addItem = (machineNo) => {
+    setMachineData(prev => ({
+      ...prev,
+      [machineNo]: {
+        ...prev[machineNo],
+        items: [
+          ...prev[machineNo].items,
+          { 
+            id: Date.now() + Math.random(),
+            item_code: '', 
+            item_name: '', 
+            raw_material_flatsize: '',
+            material_type: '',
+            wire_size: '',
+            finishedproductname: '',
+            production_quantity: '', 
+            per_meter_wt: '',
+            weight: '',
+            unit: 'Kg', 
+            efficiency: 0
+          }
+        ]
+      }
+    }));
+  };
+
+  const removeItem = (machineNo, itemId) => {
+    setMachineData(prev => {
+      const machine = prev[machineNo];
+      if (!machine || machine.items.length <= 1) return prev;
+
+      return {
+        ...prev,
+        [machineNo]: {
+          ...machine,
+          items: machine.items.filter(item => item.id !== itemId)
+        }
+      };
+    });
+  };
+
+  // ==================== CALCULATIONS ====================
+  const calculateMachineTotal = useCallback((machineNo) => {
+    const machine = machineData[machineNo];
+    if (!machine || !machine.items) return 0;
+
+    return machine.items.reduce((total, item) => {
+      return total + (parseFloat(item.weight) || 0);
+    }, 0);
+  }, [machineData]);
+
+  // ✅ **FIXED: Calculate machine efficiency based on TOTAL PRODUCTION QUANTITY**
+  const calculateMachineProductionTotal = useCallback((machineNo) => {
+    const machine = machineData[machineNo];
+    if (!machine || !machine.items) return 0;
+
+    return machine.items.reduce((total, item) => {
+      return total + (parseFloat(item.production_quantity) || 0);
+    }, 0);
+  }, [machineData]);
+
+  // ✅ **FIXED: Machine efficiency based on production quantity**
+  const calculateMachineEfficiency = useCallback((machineNo) => {
+    const machine = machineData[machineNo];
+    if (!machine || machine.target_qty === 0) return 0;
+
+    const totalProduction = calculateMachineProductionTotal(machineNo);
+    const machineEfficiency = (totalProduction / machine.target_qty) * 100;
+    return parseFloat(machineEfficiency.toFixed(1));
+  }, [machineData, calculateMachineProductionTotal]);
+
+  const sectionTotal = useMemo(() => {
+    return Object.keys(machineData).reduce((total, machineNo) => {
+      return total + calculateMachineTotal(machineNo);
+    }, 0);
+  }, [machineData, calculateMachineTotal]);
+
+  // ✅ **FIXED: Calculate total production quantity for section**
+  const sectionProductionTotal = useMemo(() => {
+    return Object.keys(machineData).reduce((total, machineNo) => {
+      return total + calculateMachineProductionTotal(machineNo);
+    }, 0);
+  }, [machineData, calculateMachineProductionTotal]);
+
+  const totalItems = useMemo(() => {
+    return Object.keys(machineData).reduce((total, machineNo) => {
+      return total + (machineData[machineNo]?.items?.length || 0);
+    }, 0);
+  }, [machineData]);
+
+  // ==================== CALCULATE TOTAL TARGET ====================
+  const totalTarget = useMemo(() => {
+    if (!selectedShift) return 0;
+    
+    return normalizedTargets
+      .filter(target => 
+        target.shift_code === selectedShift &&
+        target.section_name === CURRENT_SECTION
+      )
+      .reduce((total, target) => {
+        return total + target.target_qty;
+      }, 0);
+  }, [selectedShift, normalizedTargets]);
+
+  // ✅ **FIXED: Calculate total efficiency based on PRODUCTION QUANTITY**
+  const totalEfficiency = useMemo(() => {
+    if (totalTarget === 0) return 0;
+    
+    const totalProduction = sectionProductionTotal;
+    const totalEfficiencyValue = (totalProduction / totalTarget) * 100;
+    return parseFloat(totalEfficiencyValue.toFixed(1));
+  }, [sectionProductionTotal, totalTarget]);
+
+  // ==================== GET EFFICIENCY STATUS ====================
+  const getEfficiencyStatus = (efficiency) => {
+    if (efficiency >= 100) {
+      return {
+        text: 'Excellent',
+        color: '#00ff88',
+        icon: <FiArrowUp />,
+        direction: 'up'
+      };
+    } else if (efficiency >= 90) {
+      return {
+        text: 'Good',
+        color: '#4cc9f0',
+        icon: <FiArrowUp />,
+        direction: 'up'
+      };
+    } else if (efficiency >= 80) {
+      return {
+        text: 'Average',
+        color: '#ffcc00',
+        icon: null,
+        direction: 'neutral'
+      };
+    } else {
+      return {
+        text: 'Below Target',
+        color: '#ff4444',
+        icon: <FiArrowDown />,
+        direction: 'down'
+      };
+    }
+  };
+
+  // ==================== MACHINE NAVIGATION ====================
+  const machinesForCurrentShift = useMemo(() => {
+    if (!selectedShift) return [];
+    return normalizedTargets
+      .filter(target => 
+        target.shift_code === selectedShift &&
+        target.section_name === CURRENT_SECTION
+      )
+      .map(target => target.machine_no)
+      .filter((value, index, self) => self.indexOf(value) === index)
+      .sort((a, b) => {
+        const numA = parseInt(a.replace(/\D/g, '')) || 0;
+        const numB = parseInt(b.replace(/\D/g, '')) || 0;
+        return numA - numB;
+      });
+  }, [selectedShift, normalizedTargets]);
+
+  const nextMachine = () => {
+    if (activeMachineIndex < machinesForCurrentShift.length - 1) {
+      setActiveMachineIndex(activeMachineIndex + 1);
+    }
+  };
+
+  const prevMachine = () => {
+    if (activeMachineIndex > 0) {
+      setActiveMachineIndex(activeMachineIndex - 1);
+    }
+  };
+
+  // ==================== VALIDATION ====================
+  const validateForm = () => {
+    const errors = {};
+
+    if (!selectedShift) {
+      errors.shift = 'Please select a shift';
+    }
+
+    Object.keys(machineData).forEach(machineNo => {
+      const machine = machineData[machineNo];
+
+      if (!machine.operator_name?.trim()) {
+        errors[`operator_${machineNo}`] = 'Operator name is required';
+      }
+
+      machine.items.forEach((item, index) => {
+        if (!item.item_code) {
+          errors[`item_${machineNo}_${index}`] = 'Item selection is required';
+        }
+        if (!item.production_quantity || parseFloat(item.production_quantity) <= 0) {
+          errors[`qty_${machineNo}_${index}`] = 'Valid production quantity is required';
+        }
+        if (!item.per_meter_wt || parseFloat(item.per_meter_wt) <= 0) {
+          errors[`weight_${machineNo}_${index}`] = 'Per meter weight is required';
+        }
+        if (!item.raw_material_flatsize?.trim()) {
+          errors[`flat_${machineNo}_${index}`] = 'Raw material flat size is required';
+        }
+        if (!item.material_type?.trim()) {
+          errors[`material_${machineNo}_${index}`] = 'Material type is required';
+        }
+      });
+    });
+
+    setValidationErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  // ==================== FORM SUBMISSION ====================
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+
+    if (!validateForm()) {
+      setError('Please fix all validation errors');
+      return;
+    }
+
+    setSaving(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      const allRecords = [];
+
+      Object.keys(machineData).forEach(machineNo => {
+        const machine = machineData[machineNo];
+
+        machine.items.forEach(item => {
+          if (item.item_code && item.production_quantity) {
+            const selectedItem = items.find(i => i.item_code === item.item_code);
+
+            // ✅ **FIXED: Calculate efficiency correctly**
+            const productionQty = parseFloat(item.production_quantity) || 0;
+            const targetQty = machine.target_qty || 0;
+            const itemEfficiency = targetQty > 0 ? (productionQty / targetQty) * 100 : 0;
+
+            allRecords.push({
+              section_name: CURRENT_SECTION,
+              machine_id: machine.machine_id,
+              machine_no: machine.machine_no,
+              item_code: item.item_code,
+              item_name: selectedItem?.item_name || item.item_name || '',
+              raw_material_flatsize: item.raw_material_flatsize || '',
+              material_type: item.material_type || '',
+              wire_size: item.wire_size || '',
+              finishedproductname: item.finishedproductname || '',
+              operator_name: machine.operator_name.trim(),
+              production_quantity: parseFloat(item.production_quantity) || 0,
+              per_meter_wt: parseFloat(item.per_meter_wt) || 0,
+              weight: parseFloat(item.weight) || 0,
+              unit: item.unit || 'Kg',
+              efficiency: parseFloat(itemEfficiency.toFixed(1)),
+              users_name: machine.users_name || machine.operator_name.trim(),
+              shift_code: machine.shift_code,
+              shift_name: machine.shift_name,
+              target_qty: machine.target_qty || 0,
+              remarks: machine.remarks || '',
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            });
+          }
+        });
+      });
+
+      if (allRecords.length === 0) {
+        throw new Error('No valid records to save');
+      }
+
+      const { error: insertError } = await supabase
+        .from('spiralsection')
+        .insert(allRecords);
+
+      if (insertError) {
+        console.error('Database error:', insertError);
+        throw insertError;
+      }
+
+      localStorage.removeItem(`spiral_draft_${selectedShift}`);
+      
+      setSuccess(`Success! ${allRecords.length} records saved for ${Object.keys(machineData).length} machines`);
+
+      setTimeout(() => {
+        setSelectedShift('');
+        setMachineData({});
+        setValidationErrors({});
+        setSuccess('');
+      }, 2000);
+
+    } catch (error) {
+      console.error('Save error:', error);
+      setError('Save failed: ' + error.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ==================== UI HELPERS ====================
+  const getEfficiencyColor = (efficiency) => {
+    if (efficiency >= 100) return '#00ff88';
+    if (efficiency >= 90) return '#4cc9f0';
+    if (efficiency >= 80) return '#ffcc00';
+    return '#ff4444';
+  };
+
+  const formatNumber = (num) => {
+    return parseFloat(num).toFixed(2);
+  };
+
+  const handleBackClick = () => {
+    navigate('/production-sections/spiral');
+  };
+
+  // ✅ **FIXED: TOTAL MACHINES COUNT - TOP LEVEL HOOK**
+  const totalMachinesCount = useMemo(() => {
+    return machines.length;
+  }, [machines]);
+
+  // ==================== LOADING STATE ====================
+  if (loading) {
+    return (
+      <div className="modal-overlay">
+        <div className="modal-container loading-modal">
+          <div className="loading-content">
+            <div className="loading-spinner-large"></div>
+            <h3>Loading Production Form</h3>
+            <p>Please wait while we fetch the data...</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ==================== MAIN RENDER ====================
+  return (
+    <div className="modal-overlay" onClick={(e) => {
+      if (e.target === e.currentTarget) handleBackClick();
+    }}>
+      <div className="modal-container smart-form-modal final-design">
+        
+        {/* HEADER */}
+        <div className="modal-header final-header">
+          <div className="final-header-content">
+            <h1 className="final-main-title">Spiral Production Entry</h1>
+            <p className="final-subtitle">
+              <FiPackage /> Smart entry form for spiral section
+            </p>
+          </div>
+          
+          <div className="final-header-actions">
+            {draftSaved && (
+              <span className="draft-saved-badge final-draft-badge">
+                <FiSave /> Draft Saved
+              </span>
+            )}
+            
+            {/* ✅ **MACHINE NAVIGATION** */}
+            {selectedShift && machinesForCurrentShift.length > 0 && (
+              <div className="machine-navigation-header final-machine-nav">
+                <button
+                  type="button"
+                  onClick={prevMachine}
+                  disabled={activeMachineIndex === 0}
+                  className="nav-btn-header final-nav-btn"
+                  title="Previous Machine"
+                >
+                  <FiChevronLeft />
+                </button>
+                
+                <div className="nav-info-header final-nav-info">
+                  <span className="nav-current-header final-nav-current">
+                    <FiCpu /> Machine {machinesForCurrentShift[activeMachineIndex]}
+                  </span>
+                  <span className="nav-counter-header final-nav-counter">
+                    {activeMachineIndex + 1} / {machinesForCurrentShift.length}
+                  </span>
+                </div>
+                
+                <button
+                  type="button"
+                  onClick={nextMachine}
+                  disabled={activeMachineIndex === machinesForCurrentShift.length - 1}
+                  className="nav-btn-header final-nav-btn"
+                  title="Next Machine"
+                >
+                  <FiChevronRight />
+                </button>
+              </div>
+            )}
+            
+            <button 
+              className="btn btn-back final-back-btn"
+              onClick={handleBackClick}
+              title="Go back"
+            >
+              <FiArrowLeft /> {!isMobile && 'Back'}
+            </button>
+          </div>
+        </div>
+
+        {/* MESSAGES */}
+        {success && (
+          <div className="alert alert-success final-alert">
+            <FiCheck /> {success}
+          </div>
+        )}
+
+        {error && (
+          <div className="alert alert-error final-alert">
+            <FiAlertCircle /> {error}
+          </div>
+        )}
+
+        {/* FORM LAYOUT */}
+        <div className="form-layout final-layout">
+          
+          {/* SIDEBAR - SHIFT SELECTION */}
+          <div className="form-sidebar final-sidebar">
+            <div className="sidebar-header final-sidebar-header">
+              <FiClock />
+              <h3>Select Shift</h3>
+            </div>
+            
+            <div className="shift-options final-shift-options">
+              {shifts.map(shift => (
+                <div
+                  key={shift.id}
+                  className={`shift-option final-shift-option ${selectedShift === shift.shift_code ? 'active' : ''}`}
+                  onClick={() => handleShiftSelect(shift.shift_code)}
+                >
+                  <div className="option-content final-option-content">
+                    <span className="option-code final-option-code">Shift {shift.shift_code}</span>
+                    <span className="option-name final-option-name">
+                      {shift.shift_name === 'Day Shift' ? 'Day Shift' : 'Night Shift'}
+                    </span>
+                    <span className="option-time final-option-time">{shift.start_time} - {shift.end_time}</span>
+                  </div>
+                  <div className="option-status final-option-status">
+                    {selectedShift === shift.shift_code ? (
+                      <span className="status-active">Active</span>
+                    ) : (
+                      <span className="status-inactive">Click to load</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* ✅ **BULK OPERATIONS** */}
+            {selectedShift && Object.keys(machineData).length > 0 && (
+              <div className="bulk-operations final-bulk-operations">
+                <div className="bulk-header final-bulk-header">
+                  <FiEdit3 />
+                  <h4>Bulk Operations</h4>
+                </div>
+                <div className="bulk-controls final-bulk-controls">
+                  <div className="form-group final-form-group">
+                    <label className="form-label final-form-label">Operator Name (All Machines)</label>
+                    <input
+                      type="text"
+                      placeholder="Enter for all machines"
+                      onChange={(e) => handleBulkUpdate('operator_name', e.target.value)}
+                      className="form-input final-form-input"
+                    />
+                  </div>
+                  <div className="form-group final-form-group">
+                    <label className="form-label final-form-label">User Name (All Machines)</label>
+                    <input
+                      type="text"
+                      placeholder="Enter for all machines"
+                      onChange={(e) => handleBulkUpdate('users_name', e.target.value)}
+                      className="form-input final-form-input"
+                    />
+                  </div>
+                  <div className="form-group final-form-group">
+                    <label className="form-label final-form-label">Remarks (All Machines)</label>
+                    <input
+                      type="text"
+                      placeholder="Enter for all machines"
+                      onChange={(e) => handleBulkUpdate('remarks', e.target.value)}
+                      className="form-input final-form-input"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ✅ **SUMMARY STATS** */}
+            <div className="sidebar-stats final-sidebar-stats">
+              <div className="stat-item final-stat-item">
+                <span className="stat-label final-stat-label">Total Machines</span>
+                <span className="stat-value final-stat-value">{totalMachinesCount}</span>
+              </div>
+              {selectedShift ? (
+                <>
+                  <div className="stat-item final-stat-item">
+                    <span className="stat-label final-stat-label">Active Machines</span>
+                    <span className="stat-value final-stat-value">{machinesForCurrentShift.length}</span>
+                  </div>
+                  <div className="stat-item final-stat-item">
+                    <span className="stat-label final-stat-label">Total Items</span>
+                    <span className="stat-value final-stat-value">{totalItems}</span>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="stat-item final-stat-item">
+                    <span className="stat-label final-stat-label">Shifts</span>
+                    <span className="stat-value final-stat-value">{shifts.length}</span>
+                  </div>
+                  <div className="stat-item final-stat-item">
+                    <span className="stat-label final-stat-label">Items</span>
+                    <span className="stat-value final-stat-value">{items.length}</span>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* ✅ **CHANGE SHIFT BUTTON** */}
+            {selectedShift && (
+              <div className="change-shift-section">
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.removeItem(`spiral_draft_${selectedShift}`);
+                    setSelectedShift('');
+                    setMachineData({});
+                    setValidationErrors({});
+                    setError('');
+                    setSuccess('');
+                  }}
+                  className="btn btn-secondary final-change-shift-btn"
+                  title="Change shift"
+                >
+                  <FiRefreshCw />
+                  Change Shift
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* MAIN CONTENT */}
+          <div className="form-main-content final-main-content">
+            
+            {/* ✅ **Shift D Production Header** */}
+            {selectedShift && (
+              <div className="final-production-header">
+                <div className="final-shift-title">
+                  <h2>Shift {selectedShift} Production</h2>
+                  <div className="final-shift-info">
+                    <div className="final-machine-info">
+                      <FiCpu className="final-machine-icon" />
+                      <span className="final-machine-text">
+                        Machine {machinesForCurrentShift[activeMachineIndex] || 'Q1'}
+                      </span>
+                    </div>
+                    <div className="final-target-info">
+                      <FiTarget className="final-target-icon" />
+                      <span className="final-target-text">
+                        Target: {getTargetForMachine(machinesForCurrentShift[activeMachineIndex], selectedShift)?.target_qty || '0'} {getTargetForMachine(machinesForCurrentShift[activeMachineIndex], selectedShift)?.uom || 'Meter'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* ✅ **Three Boxes in One Line** */}
+                <div className="final-summary-boxes">
+                  {/* Box 1: Total Target */}
+                  <div className="final-summary-box final-box-target">
+                    <div className="final-box-icon">
+                      <FiTarget />
+                    </div>
+                    <div className="final-box-content">
+                      <div className="final-box-label">TOTAL TARGET</div>
+                      <div className="final-box-value">
+                        {formatNumber(totalTarget)} 
+                        <span className="final-box-unit">Kg</span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Box 2: Total Weight */}
+                  <div className="final-summary-box final-box-weight">
+                    <div className="final-box-icon">
+                      <FiPackage />
+                    </div>
+                    <div className="final-box-content">
+                      <div className="final-box-label">TOTAL WEIGHT</div>
+                      <div className="final-box-value">
+                        {formatNumber(sectionTotal)}
+                        <span className="final-box-unit">Kg</span>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Box 3: Total Efficiency */}
+                  <div className="final-summary-box final-box-efficiency">
+                    <div className="final-box-icon">
+                      <FiBarChart2 /> {/* ✅ اب FiTrendingUp کی جگہ FiBarChart2 استعمال ہو رہا ہے */}
+                    </div>
+                    <div className="final-box-content">
+                      <div className="final-box-label">TOTAL EFFICIENCY</div>
+                      <div className="final-box-value-row">
+                        <span className="final-box-efficiency-value" style={{ color: getEfficiencyColor(totalEfficiency) }}>
+                          {formatNumber(totalEfficiency)}%
+                        </span>
+                        <span className="final-box-efficiency-status" style={{ color: getEfficiencyColor(totalEfficiency) }}>
+                          {totalEfficiency >= 100 ? '↑' : '↓'} {getEfficiencyStatus(totalEfficiency).text}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* ✅ **Machine Stats** */}
+                <div className="final-machine-stats">
+                  <div className="final-machine-stat">
+                    <span className="final-stat-label">TOTAL WEIGHT:</span>
+                    <span className="final-stat-value">{formatNumber(calculateMachineTotal(machinesForCurrentShift[activeMachineIndex] || ''))} Kg</span>
+                  </div>
+                  <div className="final-machine-stat">
+                    <span className="final-stat-label">MACHINE EFFICIENCY:</span>
+                    <span 
+                      className="final-stat-efficiency" 
+                      style={{ color: getEfficiencyColor(calculateMachineEfficiency(machinesForCurrentShift[activeMachineIndex] || '')) }}
+                    >
+                      {formatNumber(calculateMachineEfficiency(machinesForCurrentShift[activeMachineIndex] || ''))}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* PRODUCTION ENTRY */}
+            {selectedShift && machinesForCurrentShift.length > 0 && (
+              <div className="production-entry final-production-entry">
+                {machinesForCurrentShift.map((machineNo, index) => {
+                  const data = machineData[machineNo] || {};
+                  const target = getTargetForMachine(machineNo, selectedShift);
+                  const totalWeight = calculateMachineTotal(machineNo);
+                  const totalProduction = calculateMachineProductionTotal(machineNo);
+                  const machineEfficiency = calculateMachineEfficiency(machineNo);
+                  
+                  // Variables are used here
+                  const debugInfo = { target, totalWeight, totalProduction, machineEfficiency };
+                  if (process.env.NODE_ENV === 'development') {
+                    console.log('Machine Debug Info:', debugInfo);
+                  }
+
+                  return (
+                    <div 
+                      key={machineNo} 
+                      className={`machine-card final-machine-card ${index === activeMachineIndex ? 'active' : ''}`}
+                      style={{ display: index === activeMachineIndex ? 'block' : 'none' }}
+                    >
+                      
+                      {/* ITEMS TABLE */}
+                      <div className="items-table-wrapper final-table-wrapper">
+                        <table className="items-table final-items-table">
+                          <thead>
+                            <tr>
+                              <th>Item Details</th>
+                              <th>Raw Material</th>
+                              <th>Production</th>
+                              <th>Weight</th>
+                              <th>Efficiency</th>
+                              <th>Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {data.items?.map((item, itemIndex) => (
+                              <tr key={item.id}>
+                                <td>
+                                  <div className="item-select-wrapper">
+                                    <select
+                                      value={item.item_code}
+                                      onChange={(e) => handleItemChange(machineNo, item.id, 'item_code', e.target.value)}
+                                      className={`form-select final-form-select ${validationErrors[`item_${machineNo}_${itemIndex}`] ? 'error' : ''}`}
+                                      title="Select item"
+                                    >
+                                      <option value="">-- Select Item --</option>
+                                      {items.map(itm => (
+                                        <option key={itm.item_code} value={itm.item_code}>
+                                          {itm.item_code} - {itm.item_name || 'Unnamed Item'}
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                </td>
+                                
+                                <td>
+                                  <div className="raw-material-fields final-raw-material-fields">
+                                    <input
+                                      type="text"
+                                      value={item.raw_material_flatsize || ''}
+                                      onChange={(e) => handleItemChange(machineNo, item.id, 'raw_material_flatsize', e.target.value)}
+                                      className={`form-input small final-form-input ${validationErrors[`flat_${machineNo}_${itemIndex}`] ? 'error' : ''}`}
+                                      placeholder="Flat Size"
+                                      title="Raw material flat size"
+                                    />
+                                    <input
+                                      type="text"
+                                      value={item.material_type || ''}
+                                      onChange={(e) => handleItemChange(machineNo, item.id, 'material_type', e.target.value)}
+                                      className={`form-input small final-form-input ${validationErrors[`material_${machineNo}_${itemIndex}`] ? 'error' : ''}`}
+                                      placeholder="Material Type"
+                                      title="Material type"
+                                    />
+                                  </div>
+                                </td>
+                                
+                                <td>
+                                  <div className="production-fields final-production-fields">
+                                    <input
+                                      type="number"
+                                      value={item.production_quantity}
+                                      onChange={(e) => handleItemChange(machineNo, item.id, 'production_quantity', e.target.value)}
+                                      step="0.01"
+                                      min="0"
+                                      className={`form-input small final-form-input ${validationErrors[`qty_${machineNo}_${itemIndex}`] ? 'error' : ''}`}
+                                      placeholder="Quantity"
+                                      title="Production quantity"
+                                    />
+                                    <input
+                                      type="number"
+                                      value={item.per_meter_wt}
+                                      onChange={(e) => handleItemChange(machineNo, item.id, 'per_meter_wt', e.target.value)}
+                                      step="0.001"
+                                      min="0"
+                                      className={`form-input small final-form-input ${validationErrors[`weight_${machineNo}_${itemIndex}`] ? 'error' : ''}`}
+                                      placeholder="Per M Wt"
+                                      title="Per meter weight"
+                                    />
+                                  </div>
+                                </td>
+                                
+                                <td>
+                                  <div className="weight-display final-weight-display">
+                                    {item.weight || '0.00'} Kg
+                                  </div>
+                                </td>
+                                
+                                <td>
+                                  <div 
+                                    className="efficiency-badge final-efficiency-badge"
+                                    style={{ 
+                                      backgroundColor: getEfficiencyColor(item.efficiency) + '20', 
+                                      color: getEfficiencyColor(item.efficiency),
+                                    }}
+                                  >
+                                    {item.efficiency}%
+                                  </div>
+                                </td>
+                                
+                                <td>
+                                  <div className="action-buttons final-action-buttons">
+                                    {data.items.length > 1 && (
+                                      <button
+                                        type="button"
+                                        onClick={() => removeItem(machineNo, item.id)}
+                                        className="btn-icon btn-danger final-remove-btn"
+                                        title="Remove item"
+                                      >
+                                        <FiTrash2 />
+                                      </button>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                        
+                        {/* ✅ **Add Item & Clear Buttons in Same Line** */}
+                        <div className="add-item-line final-add-item-line">
+                          <div className="button-group final-button-group">
+                            <button
+                              type="button"
+                              onClick={() => addItem(machineNo)}
+                              className="btn btn-outline final-add-item-btn"
+                              title="Add new item"
+                            >
+                              <FiPlus /> Add New Item
+                            </button>
+                            
+                            <button
+                              type="button"
+                              onClick={() => clearMachineData(machineNo)}
+                              className="btn btn-secondary final-clear-btn"
+                              title="Clear all data for this machine"
+                            >
+                              <FiXCircle /> Clear All
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* OPERATOR DETAILS */}
+                      <div className="machine-footer final-machine-footer">
+                        <div className="footer-grid final-footer-grid">
+                          <div className="form-group final-form-group">
+                            <label className="form-label final-form-label">
+                              <FiUser /> Operator Name
+                            </label>
+                            <input
+                              type="text"
+                              value={data.operator_name || ''}
+                              onChange={(e) => setMachineData(prev => ({
+                                ...prev,
+                                [machineNo]: { ...prev[machineNo], operator_name: e.target.value }
+                              }))}
+                              className={`form-input final-form-input ${validationErrors[`operator_${machineNo}`] ? 'error' : ''}`}
+                              placeholder="Enter operator name"
+                            />
+                          </div>
+                          
+                          <div className="form-group final-form-group">
+                            <label className="form-label final-form-label">
+                              <FiUser /> User Name
+                            </label>
+                            <input
+                              type="text"
+                              value={data.users_name || ''}
+                              onChange={(e) => setMachineData(prev => ({
+                                ...prev,
+                                [machineNo]: { ...prev[machineNo], users_name: e.target.value }
+                              }))}
+                              className="form-input final-form-input"
+                              placeholder="Enter user name"
+                            />
+                          </div>
+                          
+                          <div className="form-group final-form-group">
+                            <label className="form-label final-form-label">Remarks</label>
+                            <input
+                              type="text"
+                              value={data.remarks || ''}
+                              onChange={(e) => setMachineData(prev => ({
+                                ...prev,
+                                [machineNo]: { ...prev[machineNo], remarks: e.target.value }
+                              }))}
+                              className="form-input final-form-input"
+                              placeholder="Optional remarks"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* SUBMIT BUTTONS */}
+            {selectedShift && machinesForCurrentShift.length > 0 && (
+              <div className="form-actions final-form-actions">
+                <button
+                  type="submit"
+                  onClick={handleSubmit}
+                  className="btn btn-primary final-save-btn"
+                  disabled={saving}
+                >
+                  {saving ? (
+                    <>
+                      <div className="spinner-small"></div>
+                      Saving...
+                    </>
+                  ) : (
+                    <>
+                      <FiSave /> Save All Production Data
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default SpiralSmartForm;
